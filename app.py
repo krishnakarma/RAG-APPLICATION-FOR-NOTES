@@ -11,6 +11,10 @@ from langchain_core.prompts import ChatPromptTemplate
 
 # ------------------ CONFIG ------------------
 load_dotenv()
+
+# ✅ IMPORTANT: Use Streamlit secrets for deployment
+os.environ["MISTRAL_API_KEY"] = st.secrets["MISTRAL_API_KEY"]
+
 PERSIST_DIR = "chroma_db"
 
 st.set_page_config(page_title="RAG Book Assistant")
@@ -24,7 +28,6 @@ uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
 if uploaded_file:
 
-    # Save temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         tmp_file.write(uploaded_file.read())
         file_path = tmp_file.name
@@ -44,14 +47,18 @@ if uploaded_file:
                 st.write(f"📄 Pages loaded: {len(docs)}")
 
                 splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=1000,
-                    chunk_overlap=200
+                    chunk_size=500,       # ✅ reduced
+                    chunk_overlap=100
                 )
 
                 chunks = splitter.split_documents(docs)
 
+                # ✅ LIMIT chunks (prevents API crash)
+                chunks = chunks[:100]
+
                 st.write(f"✂️ Chunks created: {len(chunks)}")
 
+                # ✅ safety check
                 if not chunks:
                     st.error("❌ No text found in PDF. Use a text-based PDF.")
                     st.stop()
@@ -68,7 +75,6 @@ if uploaded_file:
 
             st.success("✅ Vector database created!")
 
-    # Clean temp file
     os.remove(file_path)
 
 
