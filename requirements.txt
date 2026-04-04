@@ -1,0 +1,42 @@
+# Core LangChain
+langchain
+langchain-core
+langchain-community
+langchain-text-splitters
+
+# Mistral LLM + Embeddings
+langchain-mistralai
+mistralai
+
+# Vector Database
+chromadb
+
+# Document Loaders
+pypdf
+unstructured
+beautifulsoup4
+lxml
+
+# Text Processing / Tokenization
+tiktoken
+
+# Environment Variables
+python-dotenv
+
+# Data Handling
+pandas
+numpy
+
+# API Layer (optional but useful)
+fastapi
+uvicorn
+
+# UI (optional demo)
+streamlit
+
+# Utilities
+tqdm
+requests
+
+# Optional (recommended for better retrieval)
+rank-bm25
