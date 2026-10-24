@@ -4,50 +4,96 @@ import tempfile
 import os
 import time
 import uuid
-import httpx
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 
 # ------------------ CONFIG ------------------
 load_dotenv()
 
-# Streamlit Cloud: Secrets. Local: .env or .streamlit/secrets.toml
-try:
-    api_key = st.secrets["MISTRAL_API_KEY"]
-except Exception:
-    api_key = os.getenv("MISTRAL_API_KEY")
-
-if not api_key:
-    st.error("MISTRAL_API_KEY not found. Add it to Streamlit Secrets or .env")
-    st.stop()
-
-os.environ["MISTRAL_API_KEY"] = api_key
+# Model names live here so they are easy to change if Google/Mistral retire one
+GEMINI_CHAT_MODEL = "gemini-flash-latest"
+GEMINI_EMBED_MODEL = "models/gemini-embedding-2"
+MISTRAL_CHAT_MODEL = "mistral-small-latest"
+MISTRAL_EMBED_MODEL = "mistral-embed"
 
 BATCH_SIZE = 20
+
+
+def get_secret(name):
+    """Streamlit Cloud: Secrets. Local: .env or environment variable."""
+    try:
+        return st.secrets[name]
+    except Exception:
+        return os.getenv(name)
+
+
+google_key = get_secret("GOOGLE_API_KEY") or get_secret("GEMINI_API_KEY")
+mistral_key = get_secret("MISTRAL_API_KEY")
+
+# Gemini is used if its key exists, otherwise Mistral
+if google_key:
+    PROVIDER = "Gemini"
+elif mistral_key:
+    PROVIDER = "Mistral"
+else:
+    st.error("No API key found. Add GOOGLE_API_KEY (or MISTRAL_API_KEY) to Streamlit Secrets or .env")
+    st.stop()
+
+
+def build_models():
+    if PROVIDER == "Gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+        embeddings = GoogleGenerativeAIEmbeddings(model=GEMINI_EMBED_MODEL, google_api_key=google_key)
+        llm = ChatGoogleGenerativeAI(model=GEMINI_CHAT_MODEL, google_api_key=google_key)
+    else:
+        os.environ["MISTRAL_API_KEY"] = mistral_key
+        from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
+        embeddings = MistralAIEmbeddings(model=MISTRAL_EMBED_MODEL)
+        llm = ChatMistralAI(model=MISTRAL_CHAT_MODEL)
+    return embeddings, llm
+
 
 st.set_page_config(page_title="RAG Book Assistant")
 st.title("📚 RAG Book Assistant")
 st.write("Upload a text-based PDF and ask questions")
+st.caption(f"Powered by {PROVIDER}")
 
 
 # ------------------ HELPERS ------------------
-def call_with_retry(fn, *args, retries=4, **kwargs):
-    """Retry on 429 (rate limit); show the real status code on any other error."""
+def call_with_retry(fn, *args, retries=5, **kwargs):
+    """Retry on rate limits (429 / RESOURCE_EXHAUSTED); show the real error otherwise."""
     for i in range(retries):
         try:
             return fn(*args, **kwargs)
-        except httpx.HTTPStatusError as e:
-            code = e.response.status_code
-            if code == 429 and i < retries - 1:
-                time.sleep(2 ** i)  # wait 1s, 2s, 4s
+        except Exception as e:
+            msg = str(e)
+            rate_limited = (
+                "429" in msg
+                or "RESOURCE_EXHAUSTED" in msg
+                or "rate limit" in msg.lower()
+            )
+            if rate_limited and i < retries - 1:
+                time.sleep(5 * 2 ** i)  # 5s, 10s, 20s, 40s
                 continue
-            st.error(f"Mistral API error {code}: {e.response.text[:300]}")
+            st.error(f"{PROVIDER} API error: {msg[:500]}")
             st.stop()
 
+
+def get_text(response):
+    """Gemini can return content as a list of blocks; Mistral returns a string."""
+    content = response.content
+    if isinstance(content, str):
+        return content
+    return "".join(
+        block.get("text", "") if isinstance(block, dict) else str(block)
+        for block in content
+    )
+
+
+embeddings, llm = build_models()
 
 uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
@@ -83,8 +129,6 @@ if uploaded_file:
 
             st.write(f"✂️ Chunks created: {len(chunks)}")
 
-            embeddings = MistralAIEmbeddings(model="mistral-embed")
-
             # In-memory store, unique per upload, so users do not clash
             vs = Chroma(
                 collection_name=f"c_{uuid.uuid4().hex}",
@@ -96,9 +140,10 @@ if uploaded_file:
                 batch = chunks[i:i + BATCH_SIZE]
                 call_with_retry(vs.add_documents, batch)
                 progress.progress(min((i + BATCH_SIZE) / len(chunks), 1.0))
-                time.sleep(1)  # stay under the rate limit
+                time.sleep(1.5)  # stay under the rate limit
 
             st.session_state.vectorstore = vs
+            st.session_state.pop("last_query", None)
 
         st.success("✅ Vector database created!")
 
@@ -114,8 +159,6 @@ if st.session_state.get("vectorstore"):
             "lambda_mult": 0.5
         }
     )
-
-    llm = ChatMistralAI(model="mistral-small-latest")
 
     prompt = ChatPromptTemplate.from_messages(
         [
@@ -148,23 +191,31 @@ Question:
 
     if query:
 
-        docs = call_with_retry(retriever.invoke, query)
+        # Streamlit reruns the script on every interaction, so cache by question
+        if st.session_state.get("last_query") != query:
 
-        if not docs:
-            st.error("❌ No relevant content found.")
-            st.stop()
+            docs = call_with_retry(retriever.invoke, query)
 
-        context = "\n\n".join([doc.page_content for doc in docs])
+            if not docs:
+                st.error("❌ No relevant content found.")
+                st.stop()
 
-        final_prompt = prompt.invoke({
-            "context": context,
-            "question": query
-        })
+            context = "\n\n".join([doc.page_content for doc in docs])
 
-        response = call_with_retry(llm.invoke, final_prompt)
+            final_prompt = prompt.invoke({
+                "context": context,
+                "question": query
+            })
+
+            response = call_with_retry(llm.invoke, final_prompt)
+
+            st.session_state.last_query = query
+            st.session_state.last_result = (get_text(response), docs)
+
+        answer, docs = st.session_state.last_result
 
         st.write("### 🤖 AI Answer")
-        st.write(response.content)
+        st.write(answer)
 
         st.write("### 📎 Sources")
         for d in docs:
