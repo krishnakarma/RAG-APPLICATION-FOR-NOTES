@@ -10,7 +10,7 @@ mistralai
 
 # Vector Database
 chromadb
-
+httpx
 # Document Loaders
 pypdf
 unstructured
