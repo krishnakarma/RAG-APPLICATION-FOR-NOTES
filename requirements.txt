@@ -19,7 +19,7 @@ lxml
 
 # Text Processing / Tokenization
 tiktoken
-
+langchain-google-genai
 # Environment Variables
 python-dotenv
 
